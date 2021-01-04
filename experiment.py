@@ -112,6 +112,7 @@ def train(config):
       data_path=config.data_dir, dataset=config.dataset)
   train_data, valid_data, word_to_id = raw_data
   id_to_word = {v: k for k, v in word_to_id.items()}
+  logging.info(f"Initial ID to Word: {list(id_to_word.items())[:20]}")
   vocab_size = len(word_to_id)
   max_length = reader.MAX_TOKENS_SEQUENCE[config.dataset]
   logging.info("Vocabulary size: %d", vocab_size)
@@ -181,6 +182,14 @@ def train(config):
       dropout=config.disc_dropout,
   )
 
+  # Optimizers        
+  disc_optimizer = tf.train.AdamOptimizer(
+      learning_rate=config.disc_lr, beta1=config.disc_beta1)
+
+  gen_optimizer = tf.train.AdamOptimizer(
+      learning_rate=config.gen_lr, beta1=config.gen_beta1)
+
+  # Training steps
   @tf.function
   def update_disc(real_data, gen_outputs):        
     disc_logits_real = disc(sequence=real_data["sequence"], sequence_length=real_data["sequence_length"])
@@ -199,14 +208,11 @@ def train(config):
       loss_fake = losses.sequential_cross_entropy_loss(disc_logits_fake,
                                                       targets_fake)
       disc_loss = 0.5 * loss_real + 0.5 * loss_fake
-  
-    disc_optimizer = tf.train.AdamOptimizer(
-      learning_rate=config.disc_lr, beta1=config.disc_beta1)
-    
-    disc_vars = disc.get_all_variables()
+      
+    disc_vars = disc.trainable_variables
     l2_disc = tf.reduce_sum(tf.add_n([tf.nn.l2_loss(v) for v in disc_vars]))
     scalar_disc_loss = tf.reduce_mean(disc_loss) + config.l2_disc * l2_disc
-    
+
     disc_optimizer.minimize(
       scalar_disc_loss, var_list=disc_vars, global_step=global_step)
     
@@ -214,7 +220,6 @@ def train(config):
 
   @tf.function
   def update_gen(gen_outputs, disc_logits_fake):
-
     # Loss of the generator.
     gen_loss, cumulative_rewards, baseline = losses.reinforce_loss(
         disc_logits=disc_logits_fake,
@@ -222,28 +227,24 @@ def train(config):
         gamma=config.gamma,
         decay=config.baseline_decay)
 
-    # Optimizers
-    gen_optimizer = tf.train.AdamOptimizer(
-        learning_rate=config.gen_lr, beta1=config.gen_beta1)
-
     # Get losses and variables.
-    gen_vars = gen.get_all_variables()
+    gen_vars = gen.trainable_variables
     l2_gen = tf.reduce_sum(tf.add_n([tf.nn.l2_loss(v) for v in gen_vars]))
     scalar_gen_loss = tf.reduce_mean(gen_loss) + config.l2_gen * l2_gen
 
     # Update ops.
     global_step = tf.train.get_or_create_global_step()
-  
+
     gen_optimizer.minimize(
         scalar_gen_loss, var_list=gen_vars, global_step=global_step)
     
     return scalar_gen_loss, cumulative_rewards, baseline
 
-  @tf.function
+  # @tf.function
   def update_metrics(train_feed):
     gen_outputs = gen()
     scalar_disc_loss, disc_logits_real, disc_logits_fake = update_disc(train_feed, gen_outputs)
-    scalar_gen_loss, cumulative_rewards, baseline = update_gen(train_feed, disc_logits_fake)
+    scalar_gen_loss, cumulative_rewards, baseline = update_gen(gen_outputs, disc_logits_fake)
 
     test_disc_logits_real = disc(**test_real_batch)
     test_disc_logits_fake = disc(**test_fake_batch)
@@ -270,10 +271,8 @@ def train(config):
         "baseline": tf.reduce_mean(baseline),
     }
 
-
     gen_sequence_np = gen_outputs["sequence"]
     metrics["gen_sentence"] = utils.sequence_to_sentence(gen_sequence_np[0, :], id_to_word)
-
     return metrics
 
   # Saver.
@@ -297,22 +296,24 @@ def train(config):
         'sequence_length': real_data_np["sequence_length"],
     }
 
-    # logging.info(f"Feed sequence: {train_feed}")
     # Update generator and discriminator.
     for _ in range(config.num_disc_updates):
-        # gen_outputs = gen()
-        gen_outputs = { 'sequence': [], 'sequence_length': [] }
-        # logging.info(f'Initial generation: {gen_outputs}')
-        update_disc(train_feed, gen_outputs)
+        gen_outputs = gen()
+        utils.log_gen_sequence(gen_outputs, id_to_word, "Discriminator pass, generated sentence: ")
+        scalar_disc_loss, _, _ = update_disc(train_feed, gen_outputs)
+        logging.info(f"Step {step}, discriminator scalar loss: {scalar_disc_loss}")
+
     for _ in range(config.num_gen_updates):
         gen_outputs = gen()
-        _, disc_logits_fake = update_disc(train_feed, gen_outputs)
-        update_gen(gen_outputs, disc_logits_fake)
+        utils.log_gen_sequence(gen_outputs, id_to_word, "Generator pass, generated sentence: ")
+        _, disc_logits_fake, _ = update_disc(train_feed, gen_outputs)
+        scalar_gen_loss, cumulative_rewards, _ = update_gen(gen_outputs, disc_logits_fake)
+        logging.info(f"Scalar generator loss: {scalar_gen_loss}, cumulative reward: {cumulative_rewards}")
 
     # Reporting
     ckpt.step.assign_add(1)
     if step % config.export_every == 0:
-      
+      logging.info(f'*** CHECKPOINT REACHED, UPDATE METRICS, STEP: {step} ***')
       metrics_np = update_metrics(train_feed)
       manager.save()
       metrics_np["model_path"] = tf.train.latest_checkpoint(

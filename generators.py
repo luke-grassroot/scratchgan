@@ -58,41 +58,28 @@ class LSTMGen(snt.Module):
     if self._embedding_source:
       assert vocab_file
 
-  def __call__(self, is_training=True, temperature=1.0):
-    input_keep_prob = (1. - self._input_dropout) if is_training else 1.0
-    output_keep_prob = (1. - self._output_dropout) if is_training else 1.0
-
-    batch_size = self._batch_size
-    max_sequence_length = self._max_sequence_length
-    
     if self._embedding_source:
-      all_embeddings = utils.make_partially_trainable_embeddings(
+      self.all_embeddings = utils.make_partially_trainable_embeddings(
           self._vocab_file, self._embedding_source, self._vocab_size,
           self._trainable_embedding_size)
     else:
-      all_embeddings = tf.get_variable(
+      self.all_embeddings = tf.get_variable(
           'trainable_embeddings',
           shape=[self._vocab_size, self._trainable_embedding_size],
           trainable=True)
 
-    _, self._embedding_size = all_embeddings.shape.as_list()
-    
-    logging.info(f'Calling generator, max length: {max_sequence_length}, embedding size: {self._embedding_size}, feature sizes: {self._feature_sizes}')
+    _, self._embedding_size = self.all_embeddings.shape.as_list()
 
-    input_embeddings = tf.nn.dropout(all_embeddings, 1 - input_keep_prob)
-    output_embeddings = tf.nn.dropout(all_embeddings, 1 - output_keep_prob)
+    self.out_bias = tf.Variable(tf.zeros(shape=(1, self._vocab_size)), name='out_bias', dtype=tf.float32)    
+    self.in_proj = tf.Variable(tf.ones(shape=(self._embedding_size, self._feature_sizes[0])), name='in_proj')
 
-    out_bias = tf.Variable(tf.zeros(shape=(1, self._vocab_size)), name='out_bias', dtype=tf.float32)
-    
-    in_proj = tf.Variable(tf.ones(shape=(self._embedding_size, self._feature_sizes[0])), name='in_proj')
-    
     # If more than 1 layer, then output has dim sum(self._feature_sizes),
     # which is different from input dim == self._feature_sizes[0]
     # So we need a different projection matrix for input and output.
     if len(self._feature_sizes) > 1:
-      out_proj = tf.Variable(tf.ones(shape=(self._embedding_size, sum(self._feature_sizes))), name='out_proj')
+      self.out_proj = tf.Variable(tf.ones(shape=(self._embedding_size, sum(self._feature_sizes))), name='out_proj')
     else:
-      out_proj = in_proj
+      self.out_proj = self.in_proj
 
     encoder_cells = []
     for feature_size in self._feature_sizes:
@@ -100,33 +87,46 @@ class LSTMGen(snt.Module):
       encoder_cells += [
           snt.LSTM(hidden_size=feature_size)
       ]
-    encoder_cell = snt.deep_rnn_with_skip_connections(encoder_cells)
-    state = encoder_cell.initial_state(batch_size)
+    
+    self.encoder_cell = snt.deep_rnn_with_skip_connections(encoder_cells)
+
+  def __call__(self, is_training=True, temperature=1.0):
+    input_keep_prob = (1. - self._input_dropout) if is_training else 1.0
+    output_keep_prob = (1. - self._output_dropout) if is_training else 1.0
+
+    batch_size = self._batch_size
+    max_sequence_length = self._max_sequence_length
+        
+    logging.info(f'Calling generator, max length: {max_sequence_length}, embedding size: {self._embedding_size}, feature sizes: {self._feature_sizes}')
+
+    input_embeddings = tf.nn.dropout(self.all_embeddings, 1 - input_keep_prob)
+    output_embeddings = tf.nn.dropout(self.all_embeddings, 1 - output_keep_prob)
+    
+    state = self.encoder_cell.initial_state(batch_size)
 
     # Manual unrolling.
     samples_list, logits_list, logprobs_list, embeddings_list = [], [], [], []
     sample = tf.tile(
         tf.constant(self._pad_token, dtype=tf.int32)[None], [batch_size])
-    logging.info('Unrolling over %d steps, with batch size: %d', max_sequence_length, batch_size)
     for _ in range(max_sequence_length):
       # Input is sampled word at t-1.
       embedding = tf.nn.embedding_lookup(input_embeddings, sample)
       
       embedding.shape.assert_is_compatible_with(
           [batch_size, self._embedding_size])
-      logging.debug(f'Embedding size: {embedding.shape}, and in_proj: {in_proj.shape}')
-      embedding_proj = tf.matmul(embedding, in_proj)
+      logging.debug(f'Embedding size: {embedding.shape}, and in_proj: {self.in_proj.shape}')
+      embedding_proj = tf.matmul(embedding, self.in_proj)
       logging.debug(f'Projected embedding: {embedding_proj.shape}')
       embedding_proj.shape.assert_is_compatible_with(
           [batch_size, self._feature_sizes[0]])
 
-      outputs, state = encoder_cell(embedding_proj, state)
+      outputs, state = self.encoder_cell(embedding_proj, state)
       # outputs.shape.assert_is_compatible_with([self._embedding_size, sum(self._feature_sizes)])
 
-      logging.debug(f'Now output shape: {outputs.shape} and output projection shape: {out_proj.shape}')
-      outputs_proj = tf.matmul(outputs, out_proj, transpose_b=True)
+      logging.debug(f'Now output shape: {outputs.shape} and output projection shape: {self.out_proj.shape}')
+      outputs_proj = tf.matmul(outputs, self.out_proj, transpose_b=True)
       logits = tf.matmul(
-          outputs_proj, output_embeddings, transpose_b=True) + out_bias
+          outputs_proj, output_embeddings, transpose_b=True) + self.out_bias
       categorical = tfp.distributions.Categorical(logits=logits/temperature)
       sample = categorical.sample()
       logprobs = categorical.log_prob(sample)

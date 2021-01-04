@@ -96,11 +96,11 @@ def get_position_signal(sequence_length, position_dim=8):
   # Compute the frequencies.
   periods = tf.exp(
       tf.lin_space(
-          tf.log(2.0), tf.log(tf.to_float(sequence_length)), position_dim))
+          tf.log(2.0), tf.log(tf.cast(sequence_length, tf.float32)), position_dim))
   frequencies = 1.0 / periods  # Shape [T, P].
 
   # Compute the sine waves.
-  xs = frequencies[None, :] * tf.to_float(tf.range(sequence_length)[:, None])
+  xs = frequencies[None, :] * tf.cast(tf.range(sequence_length)[:, None], tf.float32)
   shifts = tf.lin_space(0.0, 2.0, position_dim)[None, :]  # [1, P]
   positions = tf.math.cos(math.pi * (xs + shifts))  # [T, P]
   positions.shape.assert_is_compatible_with([sequence_length, position_dim])
@@ -203,11 +203,15 @@ def get_first_occurrence_indices(reference, symbol, optimize_for_tpu=False):
   index_first_occurrences = tf.minimum(index_first_occurrences + 1, max_length)
   return index_first_occurrences
 
+def log_gen_sequence(gen_outputs, id_to_word, prefix="Output sentence: "):
+    gen_sequence_np = gen_outputs["sequence"]
+    logging.info(f"{prefix}{sequence_to_sentence(gen_sequence_np[0, :], id_to_word)}")
 
 def sequence_to_sentence(sequence, id_to_word):
   """Turn a sequence into a sentence , inverse of sentence_to_sequence."""
   words = []
-  for token_index in sequence:
+  sequence_nd = sequence.numpy()
+  for token_index in sequence_nd:
     if token_index in id_to_word:
       words.append(id_to_word[token_index])
     else:

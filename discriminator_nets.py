@@ -16,10 +16,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl import logging
 import sonnet as snt
 import tensorflow as tf
+from tensorflow.python.ops.gen_nn_ops import max_pool
 import utils
-
 
 class LSTMEmbedDiscNet(snt.Module):
   """An LSTM discriminator that operates on word indexes."""
@@ -46,6 +47,31 @@ class LSTMEmbedDiscNet(snt.Module):
     if self._embedding_source:
       assert vocab_file
 
+    if self._embedding_source:
+      self.all_embeddings = utils.make_partially_trainable_embeddings(
+          self._vocab_file, self._embedding_source, self._vocab_size,
+          self._trainable_embedding_size)
+    else:
+      self.all_embeddings = tf.get_variable(
+          'trainable_embedding',
+          shape=[self._vocab_size, self._trainable_embedding_size],
+          trainable=True)
+
+    _, self._embedding_size = self.all_embeddings.shape.as_list()
+
+    self.input_fcn = snt.Linear(self._feature_sizes[0])    
+    
+    encoder_cells = []
+    for feature_size in self._feature_sizes:
+      # as elsewhere, restore layer norm later (use_layer_norm=self._use_layer_norm)
+      encoder_cells += [
+          snt.LSTM(feature_size)
+      ]
+    self.encoder_cell = snt.DeepRNN(encoder_cells)
+
+    self.batch_final = snt.BatchApply(snt.Linear(1))
+
+
   def __call__(self, sequence, sequence_length, is_training=True):
     """Connect to the graph.
 
@@ -63,52 +89,42 @@ class LSTMEmbedDiscNet(snt.Module):
     batch_size, max_sequence_length = sequence.shape.as_list()
     keep_prob = (1.0 - self._dropout) if is_training else 1.0
 
-    if self._embedding_source:
-      all_embeddings = utils.make_partially_trainable_embeddings(
-          self._vocab_file, self._embedding_source, self._vocab_size,
-          self._trainable_embedding_size)
-    else:
-      all_embeddings = tf.get_variable(
-          'trainable_embedding',
-          shape=[self._vocab_size, self._trainable_embedding_size],
-          trainable=True)
-    _, self._embedding_size = all_embeddings.shape.as_list()
-
-    input_embeddings = tf.nn.dropout(all_embeddings, 1 - keep_prob)
+    input_embeddings = tf.nn.dropout(self.all_embeddings, 1 - keep_prob)
     embeddings = tf.nn.embedding_lookup(input_embeddings, sequence)
+    
     embeddings.shape.assert_is_compatible_with(
         [batch_size, max_sequence_length, self._embedding_size])
+    
     position_dim = 8
     embeddings_pos = utils.append_position_signal(embeddings, position_dim)
+
     embeddings_pos = tf.reshape(
         embeddings_pos,
         [batch_size * max_sequence_length, self._embedding_size + position_dim])
-    lstm_inputs = snt.Linear(self._feature_sizes[0])(embeddings_pos)
+
+    lstm_inputs = self.input_fcn(embeddings_pos)
     lstm_inputs = tf.reshape(
         lstm_inputs, [batch_size, max_sequence_length, self._feature_sizes[0]])
     lstm_inputs.shape.assert_is_compatible_with(
         [batch_size, max_sequence_length, self._feature_sizes[0]])
 
-    encoder_cells = []
-    for feature_size in self._feature_sizes:
-      # as elsewhere, restore layer norm later (use_layer_norm=self._use_layer_norm)
-      encoder_cells += [
-          snt.LSTM(feature_size)
-      ]
-    encoder_cell = snt.DeepRNN(encoder_cells)
-    initial_state = encoder_cell.initial_state(batch_size)
+    initial_state = self.encoder_cell.initial_state(batch_size)
 
+    # TF2/Sonnet2 requires time-step major, so permute
+    lstm_inputs = tf.transpose(lstm_inputs, perm=[1, 0, 2])
     hidden_states, _ = snt.dynamic_unroll(
-        core=encoder_cell,
+        core=self.encoder_cell,
         input_sequence=lstm_inputs,
         sequence_length=sequence_length,
         initial_state=initial_state,
         swap_memory=True)
 
+    # Then permute back
+    hidden_states = tf.transpose(hidden_states, perm=[1, 0, 2])
     hidden_states.shape.assert_is_compatible_with(
         [batch_size, max_sequence_length,
          sum(self._feature_sizes)])
-    logits = snt.BatchApply(snt.Linear(1))(hidden_states)
+    logits = self.batch_final(hidden_states)
     logits.shape.assert_is_compatible_with([batch_size, max_sequence_length, 1])
     logits_flat = tf.reshape(logits, [batch_size, max_sequence_length])
 
@@ -120,4 +136,5 @@ class LSTMEmbedDiscNet(snt.Module):
     # timesteps, including the ones that should be masked.
     mask = utils.get_mask_past_symbol(sequence, self._pad_token)
     masked_logits_flat = logits_flat * tf.cast(mask, tf.float32)
+
     return masked_logits_flat
