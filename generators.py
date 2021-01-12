@@ -70,9 +70,10 @@ class LSTMGen(snt.Module):
 
     _, self._embedding_size = self.all_embeddings.shape.as_list()
 
+    init = tf.random_normal_initializer(mean=1., stddev=0.2)
+    self.in_proj = tf.Variable(init(shape=(self._embedding_size, self._feature_sizes[0])), name='in_proj')
     self.out_bias = tf.Variable(tf.zeros(shape=(1, self._vocab_size)), name='out_bias', dtype=tf.float32)    
-    self.in_proj = tf.Variable(tf.ones(shape=(self._embedding_size, self._feature_sizes[0])), name='in_proj')
-
+    
     # If more than 1 layer, then output has dim sum(self._feature_sizes),
     # which is different from input dim == self._feature_sizes[0]
     # So we need a different projection matrix for input and output.
@@ -81,16 +82,16 @@ class LSTMGen(snt.Module):
     else:
       self.out_proj = self.in_proj
 
-    encoder_cells = []
+    self.encoder_cells = []
     for feature_size in self._feature_sizes:
       # , use_layer_norm=self._use_layer_norm
-      encoder_cells += [
+      self.encoder_cells += [
           snt.LSTM(hidden_size=feature_size)
       ]
     
-    self.encoder_cell = snt.deep_rnn_with_skip_connections(encoder_cells)
+    self.encoder_cell = snt.deep_rnn_with_skip_connections(self.encoder_cells)
 
-  def __call__(self, is_training=True, temperature=1.0):
+  def __call__(self, is_training=True, temperature=0.2, writer=None, step=0):
     input_keep_prob = (1. - self._input_dropout) if is_training else 1.0
     output_keep_prob = (1. - self._output_dropout) if is_training else 1.0
 
@@ -150,6 +151,14 @@ class LSTMGen(snt.Module):
     mask = utils.get_mask_past_symbol(sequence, self._pad_token)
     masked_sequence = sequence * tf.cast(mask, tf.int32)
     masked_logprobs = logprobs * tf.cast(mask, tf.float32)
+
+    if writer:
+      with writer.as_default():
+        logging.info(f'Passed a writer, recording weights, step: {step}')
+        tf.summary.histogram('weight/input_proj', self.in_proj, step=step)
+        # tf.summary.histogram('gen/first_lstm', self.)
+        tf.summary.histogram('weight/output_proj', self.out_proj, step=step)
+
     return {
         'sequence': masked_sequence,
         'sequence_length': sequence_length,

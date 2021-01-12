@@ -19,8 +19,45 @@ from __future__ import print_function
 from absl import logging
 import sonnet as snt
 import tensorflow as tf
+
 from tensorflow.python.ops.gen_nn_ops import max_pool
+
 import utils
+
+class LSTMWithLayerNorm(snt.LSTM):
+  """An LSTM layer with layer norm"""
+
+  def __init__(self, hidden_size: int, use_layer_norm: False):
+    super(LSTMWithLayerNorm, self).__init__(hidden_size)
+    self._use_layer_norm = use_layer_norm
+    if use_layer_norm:
+      self.layer_norm = snt.LayerNorm(axis=slice(1, None), create_scale=True, create_offset=True)
+
+  def __call__(self, inputs, prev_state):
+    self._initialize(inputs)
+    #     return _lstm_fn(inputs, prev_state, self._w_i, self._w_h, self.b,
+                    # self.projection)
+
+    gates_x = tf.matmul(inputs, self._w_i)
+    gates_h = tf.matmul(prev_state.hidden, self._w_h)
+
+    gates = gates_x + gates_h
+    if self._use_layer_norm:
+      gates = self.layer_norm(gates)
+    
+    gates += self.b
+
+    # i = input, f = forget, g = cell updates, o = output.
+    i, f, g, o = tf.split(gates, num_or_size_splits=4, axis=1)
+
+    next_cell = tf.sigmoid(f) * prev_state.cell
+    next_cell += tf.sigmoid(i) * tf.tanh(g)
+    next_hidden = tf.sigmoid(o) * tf.tanh(next_cell)
+
+    if self.projection is not None:
+      next_hidden = tf.matmul(next_hidden, self.projection)
+
+    return next_hidden, snt.LSTMState(hidden=next_hidden, cell=next_cell)
 
 class LSTMEmbedDiscNet(snt.Module):
   """An LSTM discriminator that operates on word indexes."""
@@ -63,9 +100,8 @@ class LSTMEmbedDiscNet(snt.Module):
     
     encoder_cells = []
     for feature_size in self._feature_sizes:
-      # as elsewhere, restore layer norm later (use_layer_norm=self._use_layer_norm)
       encoder_cells += [
-          snt.LSTM(feature_size)
+          LSTMWithLayerNorm(feature_size, use_layer_norm=self._use_layer_norm)
       ]
     self.encoder_cell = snt.DeepRNN(encoder_cells)
 
@@ -86,7 +122,7 @@ class LSTMEmbedDiscNet(snt.Module):
       each sequence in the batch, the features should (hopefully) allow to
       distinguish if the value at each timestep is real or generated.
     """
-    batch_size, max_sequence_length = sequence.shape.as_list()
+    batch_size, max_sequence_length = sequence.shape if tf.executing_eagerly() else sequence.shape.as_list()
     keep_prob = (1.0 - self._dropout) if is_training else 1.0
 
     input_embeddings = tf.nn.dropout(self.all_embeddings, 1 - keep_prob)

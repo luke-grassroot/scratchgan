@@ -18,8 +18,8 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow.compat.v1 as tf
-
+import tensorflow as tf
+from tensorflow.python.eager.context import executing_eagerly
 
 def sequential_cross_entropy_loss(logits, expected):
   """The cross entropy loss for binary classification.
@@ -42,8 +42,7 @@ def sequential_cross_entropy_loss(logits, expected):
   ce = tf.nn.sigmoid_cross_entropy_with_logits(labels=expected, logits=logits)
   return tf.reshape(ce, [batch_size, sequence_length])
 
-
-def reinforce_loss(disc_logits, gen_logprobs, gamma, decay):
+def reinforce_loss(disc_logits, gen_logprobs, gamma, decay, ewma_reward = 0):
   """The REINFORCE loss.
 
   Args:
@@ -61,9 +60,13 @@ def reinforce_loss(disc_logits, gen_logprobs, gamma, decay):
   gen_logprobs.shape.assert_is_compatible_with([batch_size, sequence_length])
 
   disc_predictions = tf.nn.sigmoid(disc_logits)
-
   # MaskGAN uses log(D), but this is more stable empirically.
   rewards = 2.0 * disc_predictions - 1
+  
+  if executing_eagerly:
+    print('** First three discriminator logits: ', disc_logits[:3])
+    print('** First three resulting discriminator probas: ', disc_predictions[:3])
+    print('** And hence reward per step: ', rewards[:3])
 
   # Compute cumulative rewards.
   rewards_list = tf.unstack(rewards, axis=1)
@@ -74,21 +77,25 @@ def reinforce_loss(disc_logits, gen_logprobs, gamma, decay):
       cum_value += np.power(gamma, (s - t)) * rewards_list[s]
     cumulative_rewards.append(cum_value)
   cumulative_rewards = tf.stack(cumulative_rewards, axis=1)
-
   cumulative_rewards.shape.assert_is_compatible_with(
       [batch_size, sequence_length])
 
-  with tf.variable_scope("reinforce", reuse=tf.AUTO_REUSE):
-    ewma_reward = tf.get_variable("ewma_reward", initializer=0.0)
+  # might be more efficient to shift this loss calculation into generator
+  # with tf.variable_scope("reinforce", reuse=tf.AUTO_REUSE):
+  #   ewma_reward = tf.get_variable("ewma_reward", initializer=0.0)
 
   mean_reward = tf.reduce_mean(cumulative_rewards)
   new_ewma_reward = decay * ewma_reward + (1.0 - decay) * mean_reward
-  update_op = tf.assign(ewma_reward, new_ewma_reward)
+  ewma_reward = new_ewma_reward
 
   # REINFORCE
-  with tf.control_dependencies([update_op]):
-    advantage = cumulative_rewards - ewma_reward
-    loss = -tf.stop_gradient(advantage) * gen_logprobs
+  advantage = cumulative_rewards - ewma_reward
+  loss = -tf.stop_gradient(advantage) * gen_logprobs
+
+  if executing_eagerly:
+    print('*** Thus unrolled rewards: ', cumulative_rewards[:3])
+    print('*** And advantage: ', advantage[:3])
+    print('*** And thus loss: ', loss[:3])
 
   loss.shape.assert_is_compatible_with([batch_size, sequence_length])
   return loss, cumulative_rewards, ewma_reward

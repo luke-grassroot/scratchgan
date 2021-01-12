@@ -1,3 +1,6 @@
 data/
+model/checkpoints/
+logs/
+
 .vscode/
 __pycache__/
