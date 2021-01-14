@@ -64,9 +64,9 @@ def reinforce_loss(disc_logits, gen_logprobs, gamma, decay, ewma_reward = 0):
   rewards = 2.0 * disc_predictions - 1
   
   if executing_eagerly:
-    print('** First three discriminator logits: ', disc_logits[:3])
-    print('** First three resulting discriminator probas: ', disc_predictions[:3])
-    print('** And hence reward per step: ', rewards[:3])
+    print('** First generator logprobs: ', gen_logprobs[0][:10])
+    print('** First discriminator probas: ', disc_predictions[0][:10])
+    print('** And hence reward per step: ', rewards[0][:10])
 
   # Compute cumulative rewards.
   rewards_list = tf.unstack(rewards, axis=1)
@@ -93,9 +93,9 @@ def reinforce_loss(disc_logits, gen_logprobs, gamma, decay, ewma_reward = 0):
   loss = -tf.stop_gradient(advantage) * gen_logprobs
 
   if executing_eagerly:
-    print('*** Thus unrolled rewards: ', cumulative_rewards[:3])
-    print('*** And advantage: ', advantage[:3])
-    print('*** And thus loss: ', loss[:3])
+    print('*** Thus unrolled rewards: ', cumulative_rewards[0][:10])
+    print('*** And advantage: ', advantage[0][:10])
+    print('*** And thus loss: ', loss[0][:10])
 
   loss.shape.assert_is_compatible_with([batch_size, sequence_length])
   return loss, cumulative_rewards, ewma_reward

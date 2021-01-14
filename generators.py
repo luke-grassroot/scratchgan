@@ -40,6 +40,7 @@ class LSTMGen(snt.Module):
                input_dropout,
                output_dropout,
                pad_token,
+               temperature,
                embedding_source=None,
                vocab_file=None,
                name='lstm_gen'):
@@ -55,6 +56,8 @@ class LSTMGen(snt.Module):
     self._input_dropout = input_dropout
     self._output_dropout = output_dropout
     self._pad_token = pad_token
+    self._temperature = temperature # should see about training this
+
     if self._embedding_source:
       assert vocab_file
 
@@ -91,7 +94,7 @@ class LSTMGen(snt.Module):
     
     self.encoder_cell = snt.deep_rnn_with_skip_connections(self.encoder_cells)
 
-  def __call__(self, is_training=True, temperature=0.2, writer=None, step=0):
+  def __call__(self, is_training=True, temperature=None, writer=None, step=0):
     input_keep_prob = (1. - self._input_dropout) if is_training else 1.0
     output_keep_prob = (1. - self._output_dropout) if is_training else 1.0
 
@@ -104,32 +107,45 @@ class LSTMGen(snt.Module):
     output_embeddings = tf.nn.dropout(self.all_embeddings, 1 - output_keep_prob)
     
     state = self.encoder_cell.initial_state(batch_size)
+    # logging.info(f'Initial state shape of hidden: {state[0].shape}')
 
     # Manual unrolling.
     samples_list, logits_list, logprobs_list, embeddings_list = [], [], [], []
     sample = tf.tile(
         tf.constant(self._pad_token, dtype=tf.int32)[None], [batch_size])
-    for _ in range(max_sequence_length):
+    logging.info(f'Sample shape: {sample.shape}, and first row: {sample[0]}')
+    for t in range(max_sequence_length):
       # Input is sampled word at t-1.
+      if t < 5:
+        logging.info(f'Time {t}, provided sample for first sequence in batch: {sample[0]}')
       embedding = tf.nn.embedding_lookup(input_embeddings, sample)
+      embedding.shape.assert_is_compatible_with([batch_size, self._embedding_size])
+      if t < 5:
+        logging.info(f'Time {t}, input embedding, first in sequence: {embedding[0][:10]}')
       
-      embedding.shape.assert_is_compatible_with(
-          [batch_size, self._embedding_size])
-      logging.debug(f'Embedding size: {embedding.shape}, and in_proj: {self.in_proj.shape}')
       embedding_proj = tf.matmul(embedding, self.in_proj)
-      logging.debug(f'Projected embedding: {embedding_proj.shape}')
-      embedding_proj.shape.assert_is_compatible_with(
-          [batch_size, self._feature_sizes[0]])
+      if t < 5:
+        logging.info(f'Embedding, after projection, shape: {embedding_proj[0].shape}, and values: {embedding_proj[0][:10]}')
+      embedding_proj.shape.assert_is_compatible_with([batch_size, self._feature_sizes[0]])
 
       outputs, state = self.encoder_cell(embedding_proj, state)
       # outputs.shape.assert_is_compatible_with([self._embedding_size, sum(self._feature_sizes)])
+      if t < 5:
+        logging.info(f'Outputs from encoder cell: {outputs[0][:10]}, max: {max(outputs[0])}, at index: {tf.math.argmax(outputs[0])}')
+        # logging.info(f'Current state, shape of hidden: {state.hidden.shape}')
 
       logging.debug(f'Now output shape: {outputs.shape} and output projection shape: {self.out_proj.shape}')
       outputs_proj = tf.matmul(outputs, self.out_proj, transpose_b=True)
       logits = tf.matmul(
           outputs_proj, output_embeddings, transpose_b=True) + self.out_bias
-      categorical = tfp.distributions.Categorical(logits=logits/temperature)
+      if t < 5:
+        logging.info(f'Logits in generator: {logits[0][:10]}')
+
+      sample_temperature = temperature if temperature else self._temperature
+      categorical = tfp.distributions.Categorical(logits=logits/sample_temperature)
       sample = categorical.sample()
+      if t < 5:
+        logging.info(f'At time step {t}, sampled token: {sample[0]}, logit for token: {logits[0][sample[0]]}, max logit: {max(logits[0])}')
       logprobs = categorical.log_prob(sample)
 
       samples_list.append(sample)

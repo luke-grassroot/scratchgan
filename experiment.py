@@ -69,6 +69,8 @@ flags.DEFINE_string("checkpoint_dir", "/tmp/emnlp2017/checkpoints/",
 flags.DEFINE_integer("export_every", 1000, "Frequency of checkpoint exports.")
 flags.DEFINE_integer("num_examples_for_eval", int(1e4),
                      "Number of examples for evaluation")
+flags.DEFINE_bool("ignore_ckpt", False, "Ignore prior saved checkpoints")
+flags.DEFINE_float("temperature", 10, "Temperature for generator categorical distribution")
 
 EVALUATOR_SLEEP_PERIOD = 60  # Seconds evaluator sleeps if nothing to do.
 
@@ -161,6 +163,7 @@ def train(config):
       pad_token=reader.PAD_INT,
       embedding_source=embedding_source,
       vocab_file=vocab_file,
+      temperature=config.temperature
   )
 
   # Create discriminator.
@@ -304,14 +307,15 @@ def train(config):
   current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
   tfb_log = f'logs/gradient_tape/{current_time}'
   writer = tf.summary.create_file_writer(tfb_log)
+  # writer = None
 
   # Training.
   logging.info("Starting training")
   
   latest_ckpt = manager.latest_checkpoint
-  # if latest_ckpt:
-  #   logging.info('Checkpoint found! Loading')
-  #   ckpt.restore(manager.latest_checkpoint)
+  if latest_ckpt and not config.ignore_checkpoint:
+    logging.info('Checkpoint found! Loading')
+    ckpt.restore(manager.latest_checkpoint)
 
   # TF2 so need to keep track of baseline (= gen EWMA reward) ourselves
   baseline = 0
@@ -326,17 +330,19 @@ def train(config):
 
     # Update generator and discriminator.
     for _ in range(config.num_disc_updates):
-        gen_outputs = gen()
-        utils.log_gen_sequence(gen_outputs, id_to_word, "Discriminator pass, generated sentence: ")
-        scalar_disc_loss, _, _ = update_disc(train_feed, gen_outputs)
+      gen_outputs = gen()
+      utils.log_gen_sequence(gen_outputs, id_to_word, "Discriminator pass, generated sentence: ")
+      scalar_disc_loss, _, _ = update_disc(train_feed, gen_outputs)
+      if writer:
         with writer.as_default():
           tf.summary.scalar('disc_loss', scalar_disc_loss, step=step)
 
     for _ in range(config.num_gen_updates):
       scalar_gen_loss, _, baseline = update_gen(writer, step, baseline)
-      with writer.as_default():
-        tf.summary.scalar('gen_loss', scalar_gen_loss, step=step)
-        tf.summary.scalar('baseline', baseline, step=step)
+      if writer:
+        with writer.as_default():
+          tf.summary.scalar('gen_loss', scalar_gen_loss, step=step)
+          tf.summary.scalar('baseline', baseline, step=step)
 
     # Reporting
     ckpt.step.assign_add(1)
